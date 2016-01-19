@@ -65,24 +65,31 @@ def getData ():
 def train (filteredFaces, labels, subjects, e):
 	uniqueSubjects = np.unique(subjects)
 	accuracies = []
+	masterK = filteredFaces.dot(filteredFaces.T)
 	for testSubject in uniqueSubjects:
 		idxs = np.nonzero(subjects != testSubject)[0]
-		someFilteredFaces = filteredFaces[idxs]
+		someFilteredFacesTrain = filteredFaces[idxs]
 		someLabels = labels[idxs]
 		y = someLabels == e
-		K = someFilteredFaces.dot(someFilteredFaces.T)
+		K = masterK[idxs, :]
+		K = K[:, idxs]
 		svm = sklearn.svm.SVC(kernel="precomputed")
 		svm.fit(K, y)
-		w = svm.dual_coef_.dot(someFilteredFaces[svm.support_,:])
+
 		idxs = np.nonzero(subjects == testSubject)[0]
 		someFilteredFaces = filteredFaces[idxs]
 		someLabels = labels[idxs]
 		y = someLabels == e
-		yhat = someFilteredFaces.dot(- w.T)
-		auc = sklearn.metrics.roc_auc_score(y, yhat)
+		yhat = svm.decision_function(someFilteredFaces.dot(someFilteredFacesTrain.T))
+
+		if len(np.unique(y)) > 1:
+			auc = sklearn.metrics.roc_auc_score(y, yhat)
+		else:
+			auc = np.nan
 		print "{}: {}".format(testSubject, auc)
 		accuracies.append(auc)
-	print np.mean(accuracies)
+	accuracies = accuracies[np.isfinite(accuracies)]
+	print np.mean(accuracies), np.median(accuracies)
 
 if __name__ == "__main__":
 	faces, labels, isVSU, subjects = getData()
