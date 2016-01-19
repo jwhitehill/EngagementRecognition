@@ -88,6 +88,7 @@ def train (filteredFaces, labels, subjects, e):
 			auc = np.nan
 		print "{}: {}".format(testSubject, auc)
 		accuracies.append(auc)
+	accuracies = np.array(accuracies)
 	accuracies = accuracies[np.isfinite(accuracies)]
 	print np.mean(accuracies), np.median(accuracies)
 
@@ -103,6 +104,6 @@ if __name__ == "__main__":
 	filterBankF = np.fft.fft2(filterBank)
 	filteredFaces = filterFaces(faces, filterBankF)
 
-	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
-	for e in [ 1 ]:  # Engagement label
+	for e in [ 1, 2, 3, 4 ]:  # Engagement label
+		print "E={}".format(e)
 		train(filteredFaces, labels, subjects, e)
