@@ -1,4 +1,6 @@
 import cPickle
+import sklearn
+import sklearn.svm
 import gabor
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,12 +61,41 @@ def getData ():
 	isVSU = np.array(isVSU)
 	subjects = np.array(subjects)
 	return faces, labels, isVSU, subjects
+		
+def train (filteredFaces, labels, subjects, e):
+	uniqueSubjects = np.unique(subjects)
+	accuracies = []
+	for testSubject in uniqueSubjects:
+		idxs = np.nonzero(subjects != testSubject)[0]
+		someFilteredFaces = filteredFaces[idxs]
+		someLabels = labels[idxs]
+		y = someLabels == e
+		K = someFilteredFaces.dot(someFilteredFaces.T)
+		svm = sklearn.svm.SVC(kernel="precomputed")
+		svm.fit(K, y)
+		w = svm.dual_coef_.dot(someFilteredFaces[svm.support_,:])
+		idxs = np.nonzero(subjects == testSubject)[0]
+		someFilteredFaces = filteredFaces[idxs]
+		someLabels = labels[idxs]
+		y = someLabels == e
+		yhat = someFilteredFaces.dot(- w.T)
+		auc = sklearn.metrics.roc_auc_score(y, yhat)
+		print "{}: {}".format(testSubject, auc)
+		accuracies.append(auc)
+	print np.mean(accuracies)
 
 if __name__ == "__main__":
 	faces, labels, isVSU, subjects = getData()
-
+	
+	# Restrict to VSU
 	faces = faces[np.nonzero(isVSU)]
+	labels = labels[np.nonzero(isVSU)]
+	subjects = subjects[np.nonzero(isVSU)]
+
 	filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
 	filterBankF = np.fft.fft2(filterBank)
-	for e in [ 1, 2, 3, 4 ]:  # Engagement label
-		pass
+	filteredFaces = filterFaces(faces, filterBankF)
+
+	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
+	for e in [ 1 ]:  # Engagement label
+		train(filteredFaces, labels, subjects, e)
