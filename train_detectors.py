@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas
 
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 2000
 
 def conv2d (x, W):
 	return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
@@ -72,8 +72,8 @@ def getData ():
 	return faces, labels, isVSU, subjects
 
 def trainNN (faces, labels, subjects, e):
-	#faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
-	#faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
+	faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
+	faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
 
 	uniqueSubjects = np.unique(subjects)
 	accuracies = []
@@ -88,7 +88,7 @@ def trainNN (faces, labels, subjects, e):
 		sx = np.std(train_x, axis=0, keepdims=True)
 		sx[sx == 0] = 1
 		# Normalize
-		#train_x = (train_x - mx) / sx
+		train_x = (train_x - mx) / sx
 
 		# Shuffle training examples
 		idxs = np.random.permutation(train_x.shape[0])
@@ -144,6 +144,18 @@ def weight_variable (shape, wd = 0):
 	tf.add_to_collection("losses", weight_decay)
 	return var
 
+def get_randomly_shifted (faces, cropSize):
+	diff = faces.shape[1] - cropSize
+	shiftedFaces = np.zeros((faces.shape[0], cropSize, cropSize, faces.shape[3]))
+	for i in range(faces.shape[0]):
+		sx = np.random.randint(0, diff)
+		sy = np.random.randint(0, diff)
+		if np.random.random() < 0.5:
+			shiftedFaces[i,:,:,:] = faces[i, sx:sx+cropSize, sy:sy+cropSize, :]
+		else:
+			shiftedFaces[i,:,:,:] = np.fliplr(faces[i, sx:sx+cropSize, sy:sy+cropSize, :])
+	return shiftedFaces
+
 def bias_variable (shape):
 	var = tf.constant(0.1, shape=shape)
 	return tf.Variable(var)
@@ -153,17 +165,23 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
-		x_image = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], train_x.shape[3]])
+		x_image = tf.placeholder("float", shape=[None, train_x.shape[1] - 4, train_x.shape[2] - 4, train_x.shape[3]])
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
+		# Conv1
 		W_conv1 = weight_variable([7, 7, 1, 4])
 		b_conv1 = bias_variable([4])
 		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
+		# LRN
+		#h_conv1_normed = tf.nn.local_response_normalization(h_conv1, depth_radius=1, alpha=2, beta=0.75)
+		# Pool
+		#h_pool1 = max_pool(h_conv1_normed, 4)
 		h_pool1 = max_pool(h_conv1, 4)
-		h_pool1_reshaped = tf.reshape(h_pool1, [-1, 12*12*4])
+		# Vectorize
+		h_pool1_reshaped = tf.reshape(h_pool1, [-1, 11*11*4])
 
 		# FC2
-		W2 = weight_variable([ 12*12*4, train_y.shape[1] ], wd=1e-1)
+		W2 = weight_variable([ 11*11*4, train_y.shape[1] ], wd=1e-1)
 		b2 = bias_variable([ train_y.shape[1] ])
 		y_conv = tf.nn.softmax(tf.matmul(h_pool1_reshaped, W2) + b2)
 
@@ -181,23 +199,24 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
-			train_step.run({x_image: train_x[offset:offset+BATCH_SIZE, :, :, :], y_: train_y[offset:offset+BATCH_SIZE, :]})
-			if i % 50 == 0:
-				ll = cross_entropy.eval({x_image: train_x, y_: train_y})
-				auc = sklearn.metrics.roc_auc_score(train_y[:,1], y_conv.eval({x_image: train_x})[:,1])
+			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
+			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE, :]})
+			if i % 100 == 0:
+				ll = cross_entropy.eval({x_image: train_x[:, 2:46, 2:46, :], y_: train_y})
+				auc = sklearn.metrics.roc_auc_score(train_y[:,1], y_conv.eval({x_image: train_x[:, 2:46, 2:46, :]})[:,1])
 				print "Train LL={} AUC={}".format(ll, auc)
 
-				ll = cross_entropy.eval({x_image: test_x, y_: test_y})
-				auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x})[:,1])
+				ll = cross_entropy.eval({x_image: test_x[:, 2:46, 2:46, :], y_: test_y})
+				auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :]})[:,1])
 				print "Test LL={} AUC={}".format(ll, auc)
 
-				plt.imshow(np.reshape(h_conv1.eval({x_image: train_x[0:1,:,:,:]})[0,:,:,0], [48,48]))
-				plt.show()
-				plt.imshow(np.reshape(h_pool1.eval({x_image: train_x[0:1,:,:,:]})[0,:,:,0], [12,12]))
-				plt.show()
-				plt.imshow(np.reshape(W2.eval()[0:144,0], [ 12,12 ]))
-				plt.show()
-		auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x})[:,1])
+				#plt.imshow(np.reshape(h_conv1.eval({x_image: train_x[0:1, 2:46, 2:46,:]})[0,:,:,0], [44,44]))
+				#plt.show()
+				#plt.imshow(np.reshape(h_pool1.eval({x_image: train_x[0:1, 2:46, 2:46,:]})[0,:,:,0], [11,11]))
+				#plt.show()
+				#plt.imshow(np.reshape(W2.eval()[0:121,0], [ 11,11 ]))
+				#plt.show()
+		auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :]})[:,1])
 		session.close()
 		return auc
 
