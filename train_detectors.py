@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas
 
-NUM_EPOCHS = 2000
+NUM_EPOCHS = 5000
 
 def conv2d (x, W):
 	return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
@@ -99,12 +99,15 @@ def trainNN (faces, labels, subjects, e):
 		test_x = faces[idxs]
 		test_x = np.reshape(test_x, test_x.shape + (1,))
 		someLabels = labels[idxs]
+		if len(np.unique(someLabels == e)) == 1:  # Don't bother if only 1 class in test set
+			continue
 		test_y = np.atleast_2d(someLabels != e).T
 		test_y = np.hstack((test_y, 1 - test_y)).astype(np.float32)
 		# Normalize
 		test_x = (test_x - mx) / sx
 
 		auc = runNNSimple(train_x, train_y, test_x, test_y)
+		#auc = runNNRawPixels(train_x, train_y, test_x, test_y)
 		print "{}: {}".format(testSubject, auc)
 		print ""
 
@@ -138,13 +141,14 @@ def trainSVM (filteredFaces, labels, subjects, e):
 	accuracies = accuracies[np.isfinite(accuracies)]
 	print np.mean(accuracies), np.median(accuracies)
 
-def weight_variable (shape, wd = 0):
-	var = tf.Variable(tf.truncated_normal(shape, stddev=0.1))
+def weight_variable (shape, stddev = 0.1, wd = 0):
+	var = tf.Variable(tf.truncated_normal(shape, stddev=stddev))
 	weight_decay = tf.mul(tf.nn.l2_loss(var), wd)
 	tf.add_to_collection("losses", weight_decay)
 	return var
 
 def get_randomly_shifted (faces, cropSize):
+	return faces[:, 2:46, 2:46, :]
 	diff = faces.shape[1] - cropSize
 	shiftedFaces = np.zeros((faces.shape[0], cropSize, cropSize, faces.shape[3]))
 	for i in range(faces.shape[0]):
@@ -156,9 +160,54 @@ def get_randomly_shifted (faces, cropSize):
 			shiftedFaces[i,:,:,:] = np.fliplr(faces[i, sx:sx+cropSize, sy:sy+cropSize, :])
 	return shiftedFaces
 
-def bias_variable (shape):
-	var = tf.constant(0.1, shape=shape)
+def bias_variable (shape, b=0.1):
+	var = tf.constant(b, shape=shape)
 	return tf.Variable(var)
+
+def runNNRawPixels (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
+	BATCH_SIZE = 128
+	with tf.Graph().as_default():
+		session = tf.InteractiveSession()
+
+		x_image = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], train_x.shape[3]])
+		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
+
+		SIZE = 48
+		x_image_resized = tf.image.resize_images(x_image, SIZE, SIZE)  # Downscale
+
+		x_image_vec = tf.reshape(x_image_resized, [-1, SIZE*SIZE])
+		W = weight_variable([SIZE*SIZE, train_y.shape[1]], stddev=0.001)
+		b = bias_variable([train_y.shape[1]])
+
+		yhat = tf.nn.softmax(tf.matmul(x_image_vec, W) + b)
+
+		cross_entropy = -tf.reduce_mean(y_*tf.log(tf.clip_by_value(yhat,1e-10,1.0)), name='cross_entropy')
+		tf.add_to_collection('losses', cross_entropy)
+		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+		#train_step = tf.train.GradientDescentOptimizer(learning_rate=.01).minimize(total_loss)
+		LEARNING_RATE = 0.05
+		batch = tf.Variable(0)
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/5, 0.99, staircase=True)
+		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
+		#train_step = tf.train.AdamOptimizer(learning_rate=.01).minimize(total_loss)
+
+		session.run(tf.initialize_all_variables())
+		for i in range(numEpochs):
+			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
+			some_train_x = train_x[offset:offset+BATCH_SIZE, :, :, :]
+			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE, :]})
+			if i % 100 == 0:
+				ll = total_loss.eval({x_image: train_x[:, :, :, :], y_: train_y})
+				auc = sklearn.metrics.roc_auc_score(train_y[:,1], yhat.eval({x_image: train_x[:, :, :, :]})[:,1])
+				print "Train LL={} AUC={}".format(ll, auc)
+
+				ll = total_loss.eval({x_image: test_x[:, :, :, :], y_: test_y})
+				auc = sklearn.metrics.roc_auc_score(test_y[:,1], yhat.eval({x_image: test_x[:, :, :, :]})[:,1])
+				print "Test LL={} AUC={}".format(ll, auc)
+		auc = sklearn.metrics.roc_auc_score(test_y[:,1], yhat.eval({x_image: test_x[:, :, :, :]})[:,1])
+		session.close()
+		return auc
 
 def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	BATCH_SIZE = 128
@@ -169,23 +218,29 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
 		# Conv1
-		W_conv1 = weight_variable([7, 7, 1, 4])
-		b_conv1 = bias_variable([4])
+		NUM_FILTERS = 4
+		W_conv1 = weight_variable([3, 3, 1, NUM_FILTERS], stddev=0.1)
+		b_conv1 = bias_variable([NUM_FILTERS], b=1.)
 		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
 		# LRN
 		#h_conv1_normed = tf.nn.local_response_normalization(h_conv1, depth_radius=1, alpha=2, beta=0.75)
 		# Pool
 		#h_pool1 = max_pool(h_conv1_normed, 4)
-		h_pool1 = max_pool(h_conv1, 4)
+		h_pool1 = max_pool(h_conv1, 2)
 		# Vectorize
-		h_pool1_reshaped = tf.reshape(h_pool1, [-1, 11*11*4])
+		h_pool1_reshaped = tf.reshape(h_pool1, [-1, 22*22*NUM_FILTERS])
 
-		# FC2
-		W2 = weight_variable([ 11*11*4, train_y.shape[1] ], wd=1e-1)
-		b2 = bias_variable([ train_y.shape[1] ])
-		y_conv = tf.nn.softmax(tf.matmul(h_pool1_reshaped, W2) + b2)
+		# Dropout
+		keep_prob = tf.placeholder("float")
+		h_pool1_drop = tf.nn.dropout(h_pool1_reshaped, keep_prob)
 
-		cross_entropy = -tf.reduce_mean(y_*tf.log(tf.clip_by_value(y_conv,1e-10,1.0)), name='cross_entropy')
+		# FC1
+		W1 = weight_variable([ 22*22*NUM_FILTERS, train_y.shape[1] ], stddev=1e-10, wd=1e-3)
+		b1 = bias_variable([ train_y.shape[1] ], b=1.)
+		fc1 = tf.matmul(h_pool1_drop, W1) + b1
+		y_conv = tf.nn.softmax(fc1)
+
+		cross_entropy = -tf.reduce_mean(y_*tf.log(y_conv), name='cross_entropy')
 		tf.add_to_collection('losses', cross_entropy)
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
@@ -193,21 +248,22 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		LEARNING_RATE = 0.05
 		batch = tf.Variable(0)
 		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/5, 0.95, staircase=True)
-		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.9).minimize(total_loss, global_step=batch)
+		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
 		#train_step = tf.train.AdamOptimizer(learning_rate=.01).minimize(total_loss)
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
-			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE, :]})
+			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE, :], keep_prob: 0.9})
 			if i % 100 == 0:
-				ll = cross_entropy.eval({x_image: train_x[:, 2:46, 2:46, :], y_: train_y})
-				auc = sklearn.metrics.roc_auc_score(train_y[:,1], y_conv.eval({x_image: train_x[:, 2:46, 2:46, :]})[:,1])
+				print fc1.eval({x_image: train_x[0:1, 2:46, 2:46, :], keep_prob: 1.0})
+				ll = total_loss.eval({x_image: train_x[:, 2:46, 2:46, :], y_: train_y, keep_prob: 1.0})
+				auc = sklearn.metrics.roc_auc_score(train_y[:,1], y_conv.eval({x_image: train_x[:, 2:46, 2:46, :], keep_prob: 1.0})[:,1])
 				print "Train LL={} AUC={}".format(ll, auc)
 
-				ll = cross_entropy.eval({x_image: test_x[:, 2:46, 2:46, :], y_: test_y})
-				auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :]})[:,1])
+				ll = total_loss.eval({x_image: test_x[:, 2:46, 2:46, :], y_: test_y, keep_prob: 1.0})
+				auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :], keep_prob: 1.0})[:,1])
 				print "Test LL={} AUC={}".format(ll, auc)
 
 				#plt.imshow(np.reshape(h_conv1.eval({x_image: train_x[0:1, 2:46, 2:46,:]})[0,:,:,0], [44,44]))
@@ -216,7 +272,7 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				#plt.show()
 				#plt.imshow(np.reshape(W2.eval()[0:121,0], [ 11,11 ]))
 				#plt.show()
-		auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :]})[:,1])
+		auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x[:, 2:46, 2:46, :], keep_prob: 1.0})[:,1])
 		session.close()
 		return auc
 
@@ -251,7 +307,7 @@ def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 
 		LEARNING_RATE = 0.1
 		batch = tf.Variable(0)
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/5, 0.95, staircase=True)
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/5, 0.99, staircase=True)
 		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
@@ -279,7 +335,8 @@ if __name__ == "__main__":
 		filterBankF = np.fft.fft2(filterBank)
 		filteredFaces = filterFaces(faces, filterBankF)
 
-	for e in [ 1, 2, 3, 4 ]:  # Engagement label
+	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
+	for e in [ 3 ]:  # Engagement label
 		print "E={}".format(e)
 		#trainSVM(filteredFaces, labels, subjects, e)
 		trainNN(faces, labels, subjects, e)
