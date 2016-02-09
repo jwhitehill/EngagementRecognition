@@ -11,6 +11,7 @@ from skimage.transform import resize
 
 FACE_SIZE = 36
 NUM_EPOCHS = 20000
+BATCH_SIZE = 128
 
 def resizeFaces (faces, newSize):
 	newFaces = np.zeros((faces.shape[0], newSize, newSize), dtype=np.float32)
@@ -336,8 +337,15 @@ def runNNRawPixels (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 		return auc
 
+def evalCorr (x_image, x, y_pred, y, keep_prob):
+	yhat = []
+	for i in range(int(np.ceil(x.shape[0] / float(BATCH_SIZE)))):
+		idxs = range(i*BATCH_SIZE, min((i+1)*BATCH_SIZE, x.shape[0]))
+		someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze())
+		yhat += someYhat
+	return np.corrcoef(y.squeeze(), yhat)[0,1]
+
 def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
-	BATCH_SIZE = 128
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
@@ -390,9 +398,10 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		for i in range(numEpochs):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
+			some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE], keep_prob: 0.25})
 			if i % 100 == 0:
-				ll = total_loss.eval({x_image: train_x[:, :, :, :], y_: train_y, keep_prob: 1.0})
+				ll = total_loss.eval({x_image: some_train_x[:, :, :, :], y_: some_train_y, keep_prob: 1.0})
 				r = np.corrcoef(train_y.squeeze(), y_pred.eval({x_image: train_x, keep_prob: 1.0}).squeeze())[0,1]
 				print "Train LL={} r={}".format(ll, r)
 
