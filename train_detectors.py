@@ -7,8 +7,15 @@ import gabor
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas
+from skimage.transform import resize
 
 NUM_EPOCHS = 20000
+
+def resizeFaces (faces, newSize):
+	newFaces = np.zeros((faces.shape[0], newSize, newSize))
+	for i in range(faces.shape[0]):
+		newFaces[i,:,:] = resize(faces[i,:,:], (newSize, newSize), preserve_range=True)
+	return newFaces
 
 def getEigenfaces (faces):
 	faces = np.reshape(faces, [ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ])
@@ -170,14 +177,12 @@ def trainNN (faces, labels, subjects, e):
 		print "{}: {}".format(testSubject, auc)
 		print ""
 
-def trainSVMRegression (filteredFaces, labels, subjects, subjectIdx):
+def trainSVMRegression (filteredFaces, labels, subjects, C):
 	uniqueSubjects = np.unique(subjects)
 	accuracies = []
 	masterK = filteredFaces.dot(filteredFaces.T)
 
 	for i, testSubject in enumerate(uniqueSubjects):
-		if i != subjectIdx:
-			continue
 		trainIdxs = np.nonzero(subjects != testSubject)[0]
 		someFilteredFacesTrain = filteredFaces[trainIdxs]
 		someLabels = labels[trainIdxs]
@@ -187,17 +192,17 @@ def trainSVMRegression (filteredFaces, labels, subjects, subjectIdx):
 		svms = []
 		features = []
 		for e in range(1, 5):
-			print "Train SVM for {}".format(e)
 			y = someLabels == e
-			svm = sklearn.svm.SVC(kernel="precomputed")
+			svm = sklearn.svm.SVC(kernel="precomputed", C=C)
 			svm.fit(K, y)
 			svms.append(svm)
 			yhat = svm.decision_function(K)
 			features.append(yhat)
 		features = np.array(features).T
-		print "About to fit linear regressor..."
 		lr = sklearn.linear_model.LinearRegression()
 		lr.fit(features, y)
+		yhat = lr.predict(features)
+		print np.corrcoef(y, yhat)[0,1]
 
 		testIdxs = np.nonzero(subjects == testSubject)[0]
 		someFilteredFaces = filteredFaces[testIdxs]
@@ -517,7 +522,7 @@ def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 
 if __name__ == "__main__":
-	subjectIdx = int(sys.argv[1])
+	C = float(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
@@ -533,4 +538,4 @@ if __name__ == "__main__":
 	#	trainNN(faces, labels, subjects, e)
 
 	#trainNNRegression(faces, labels, subjects, subjectIdx)
-	trainSVMRegression(filteredFaces, labels, subjects, subjectIdx)
+	trainSVMRegression(filteredFaces, labels, subjects, C)
