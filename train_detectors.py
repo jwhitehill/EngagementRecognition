@@ -9,10 +9,11 @@ import numpy as np
 import pandas
 from skimage.transform import resize
 
+FACE_SIZE = 36
 NUM_EPOCHS = 20000
 
 def resizeFaces (faces, newSize):
-	newFaces = np.zeros((faces.shape[0], newSize, newSize))
+	newFaces = np.zeros((faces.shape[0], newSize, newSize), dtype=np.float32)
 	for i in range(faces.shape[0]):
 		newFaces[i,:,:] = resize(faces[i,:,:], (newSize, newSize), preserve_range=True)
 	return newFaces
@@ -56,7 +57,10 @@ def filterSomeFaces (faces, filterBankF):
 	return results
 
 def getDataFast ():
-	faces = np.load("faces.npy")
+	if FACE_SIZE == 36:
+		faces = np.load("faces36.npy")
+	else:
+		faces = np.load("faces.npy")
 	labels = np.load("labels.npy")
 	isVSU = np.load("isVSU.npy")
 	subjects = np.load("subjects.npy")
@@ -101,8 +105,8 @@ def getData ():
 	return faces, labels, isVSU, subjects
 
 def trainNNRegression (faces, labels, subjects, subjectIdx):
-	faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
-	faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,48,48])
+	faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
+	faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
 
 	uniqueSubjects = np.unique(subjects)
 	accuracies = []
@@ -341,16 +345,16 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
 		# Conv1
-		NUM_FILTERS1 = 8
-		W_conv1 = weight_variable([3, 3, 1, NUM_FILTERS1], stddev=0.01)
+		NUM_FILTERS1 = 12
+		W_conv1 = weight_variable([5, 5, 1, NUM_FILTERS1], stddev=0.01)
 		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
 		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
 		# Pool
 		h_pool1 = max_pool(h_conv1, 2)
 
 		# Conv2
-		NUM_FILTERS2 = 8
-		W_conv2 = weight_variable([3, 3, NUM_FILTERS1, NUM_FILTERS2], stddev=0.01)
+		NUM_FILTERS2 = 12
+		W_conv2 = weight_variable([5, 5, NUM_FILTERS1, NUM_FILTERS2], stddev=0.01)
 		b_conv2 = bias_variable([NUM_FILTERS2], b=1.)
 		h_input2 = conv2d(h_pool1, W_conv2) + b_conv2
 		h_conv2 = tf.nn.relu(h_input2)
@@ -358,14 +362,14 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		h_pool2 = max_pool(h_conv2, 2)
 
 		# Vectorize
-		h_pool2_reshaped = tf.reshape(h_pool2, [-1, 12*12*NUM_FILTERS2])
+		h_pool2_reshaped = tf.reshape(h_pool2, [-1, (FACE_SIZE/4)*(FACE_SIZE/4)*NUM_FILTERS2])
 
 		# Dropout
 		keep_prob = tf.placeholder("float")
 		h_pool1_drop = tf.nn.dropout(h_pool2_reshaped, keep_prob)
 
 		# FC1
-		W1 = weight_variable([ 12*12*NUM_FILTERS2, train_y.shape[1] ], stddev=0.01, wd=1e-2)
+		W1 = weight_variable([ (FACE_SIZE/4)*(FACE_SIZE/4)*NUM_FILTERS2, train_y.shape[1] ], stddev=0.01, wd=1e-2)
 		b1 = bias_variable([ train_y.shape[1] ], b=0.)
 		fc1 = tf.matmul(h_pool1_drop, W1) + b1
 		y_pred = 1. + 3*tf.sigmoid(fc1)
@@ -522,20 +526,20 @@ def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 
 if __name__ == "__main__":
-	C = float(sys.argv[1])
+	subjectIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
 	
-		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		filterBankF = np.fft.fft2(filterBank)
-		filteredFaces = filterFaces(faces, filterBankF)
+		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		#filterBankF = np.fft.fft2(filterBank)
+		#filteredFaces = filterFaces(faces, filterBankF)
 
 	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
 	#	print "E={}".format(e)
 	#	#trainSVM(filteredFaces, labels, subjects, e)
 	#	trainNN(faces, labels, subjects, e)
 
-	#trainNNRegression(faces, labels, subjects, subjectIdx)
-	trainSVMRegression(filteredFaces, labels, subjects, C)
+	trainNNRegression(faces, labels, subjects, subjectIdx)
+	#trainSVMRegression(filteredFaces, labels, subjects, C)
