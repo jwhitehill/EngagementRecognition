@@ -9,7 +9,7 @@ import numpy as np
 import pandas
 from skimage.transform import resize
 
-FACE_SIZE = 36
+FACE_SIZE = 48
 NUM_EPOCHS = 20000
 BATCH_SIZE = 128
 
@@ -105,16 +105,24 @@ def getData ():
 
 	return faces, labels, isVSU, subjects
 
-def trainNNRegression (faces, labels, subjects, subjectIdx):
+def trainNNRegression (faces, labels, subjects, foldIdx):
 	faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
 	faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
 
-	uniqueSubjects = np.unique(subjects)
+	NUM_FOLDS = 4
+	np.random.seed(0)  # Make sure the folds are always the same
+	uniqueSubjects = np.random.permutation(np.unique(subjects))
 	accuracies = []
-	for i, testSubject in enumerate(uniqueSubjects):
-		if i != subjectIdx:
+
+	numSubjectsPerFold = int(np.ceil(len(uniqueSubjects) / float(NUM_FOLDS)))
+	for i in range(NUM_FOLDS):
+		if i != foldIdx:
 			continue
-		idxs = np.nonzero(subjects != testSubject)[0]
+		firstSubjectIdx = i*numSubjectsPerFold
+		lastSubjectIdx = min((i+1)*numSubjectsPerFold, len(uniqueSubjects))
+		testSubjects = uniqueSubjects[range(firstSubjectIdx, lastSubjectIdx)]
+
+		idxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
 		train_x = faces[idxs]
 		train_x = np.reshape(train_x, train_x.shape + (1,))
 		someLabels = labels[idxs]
@@ -130,7 +138,7 @@ def trainNNRegression (faces, labels, subjects, subjectIdx):
 		train_x = train_x[idxs,:,:,:]
 		train_y = train_y[idxs,:]
 
-		idxs = np.nonzero(subjects == testSubject)[0]
+		idxs = np.nonzero(np.in1d(subjects, testSubjects) == True)[0]
 		test_x = faces[idxs]
 		test_x = np.reshape(test_x, test_x.shape + (1,))
 		someLabels = labels[idxs]
@@ -139,7 +147,7 @@ def trainNNRegression (faces, labels, subjects, subjectIdx):
 		test_x = (test_x - mx) / sx
 
 		r = runNNRegression(train_x, train_y, test_x, test_y)
-		print "{}: {}".format(testSubject, r)
+		print "Fold {}: {}".format(i, r)
 		print ""
 
 def trainNN (faces, labels, subjects, e):
@@ -262,7 +270,7 @@ def trainSVM (filteredFaces, labels, subjects, e):
 	print np.mean(accuracies), np.median(accuracies)
 
 def weight_variable (shape, stddev = 0.1, wd = 0):
-	values = np.random.randn(*shape).astype(np.float32)
+	values = stddev * np.random.randn(*shape).astype(np.float32)
 	values = np.reshape(values, [ np.prod(shape[0:-1]), shape[-1] ])
 	u,s,v = np.linalg.svd(values, full_matrices=False)
 	u = np.reshape(u, shape)
@@ -341,8 +349,8 @@ def evalCorr (x_image, x, y_pred, y, keep_prob):
 	yhat = []
 	for i in range(int(np.ceil(x.shape[0] / float(BATCH_SIZE)))):
 		idxs = range(i*BATCH_SIZE, min((i+1)*BATCH_SIZE, x.shape[0]))
-		someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze())
-		yhat += someYhat
+		someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze()
+		yhat += list(someYhat)
 	return np.corrcoef(y.squeeze(), yhat)[0,1]
 
 def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
@@ -353,7 +361,7 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
 		# Conv1
-		NUM_FILTERS1 = 12
+		NUM_FILTERS1 = 16
 		W_conv1 = weight_variable([5, 5, 1, NUM_FILTERS1], stddev=0.01)
 		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
 		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
@@ -361,8 +369,8 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		h_pool1 = max_pool(h_conv1, 2)
 
 		# Conv2
-		NUM_FILTERS2 = 12
-		W_conv2 = weight_variable([5, 5, NUM_FILTERS1, NUM_FILTERS2], stddev=0.01)
+		NUM_FILTERS2 = 8
+		W_conv2 = weight_variable([3, 3, NUM_FILTERS1, NUM_FILTERS2], stddev=0.01)
 		b_conv2 = bias_variable([NUM_FILTERS2], b=1.)
 		h_input2 = conv2d(h_pool1, W_conv2) + b_conv2
 		h_conv2 = tf.nn.relu(h_input2)
@@ -388,7 +396,7 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
 		#train_step = tf.train.GradientDescentOptimizer(learning_rate=.01).minimize(total_loss)
-		LEARNING_RATE = 0.001
+		LEARNING_RATE = 0.0001
 		batch = tf.Variable(0)
 		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/10, 0.9, staircase=True)
 		#train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.5).minimize(total_loss, global_step=batch)
@@ -399,17 +407,15 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
 			some_train_y = train_y[offset:offset+BATCH_SIZE, :]
-			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE], keep_prob: 0.25})
+			train_step.run({x_image: some_train_x, y_: some_train_y, keep_prob: 0.25})
 			if i % 100 == 0:
 				ll = total_loss.eval({x_image: some_train_x[:, :, :, :], y_: some_train_y, keep_prob: 1.0})
-				r = np.corrcoef(train_y.squeeze(), y_pred.eval({x_image: train_x, keep_prob: 1.0}).squeeze())[0,1]
-				print "Train LL={} r={}".format(ll, r)
+				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x_image, train_x, y_pred, train_y, keep_prob))
 
 				ll = total_loss.eval({x_image: test_x[:, :, :, :], y_: test_y, keep_prob: 1.0})
-				r = np.corrcoef(test_y.squeeze(), y_pred.eval({x_image: test_x, keep_prob: 1.0}).squeeze())[0,1]
-				print "Test LL={} r={}".format(ll, r)
+				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x_image, test_x, y_pred, test_y, keep_prob))
 
-		r = np.corrcoef(test_y.squeeze(), y_pred.eval({x_image: test_x, keep_prob: 1.0}).squeeze())[0,1]
+		r = evalCorr(x_image, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
 
@@ -535,7 +541,7 @@ def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 
 if __name__ == "__main__":
-	subjectIdx = int(sys.argv[1])
+	foldIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
@@ -550,5 +556,5 @@ if __name__ == "__main__":
 	#	#trainSVM(filteredFaces, labels, subjects, e)
 	#	trainNN(faces, labels, subjects, e)
 
-	trainNNRegression(faces, labels, subjects, subjectIdx)
+	trainNNRegression(faces, labels, subjects, foldIdx)
 	#trainSVMRegression(filteredFaces, labels, subjects, C)
