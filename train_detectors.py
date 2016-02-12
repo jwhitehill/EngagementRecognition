@@ -20,11 +20,18 @@ def resizeFaces (faces, newSize):
 	return newFaces
 
 def getEigenfaces (faces):
-	faces = np.reshape(faces, [ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ])
+	faces = np.reshape(faces, [ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ]).copy()  # Copy so we don't affect caller's object
 	faces -= np.mean(faces, axis=0, keepdims=True)
-	cov = faces.T.dot(faces)
+	cov = faces.T.copy().dot(faces)  # Copy so that it's contiguous and thus faster
 	u,s,v = np.linalg.svd(cov)
-	return u[:, NUM_COMPONENTS]
+	return u[:, 0:NUM_COMPONENTS]
+
+def perturbFaces (faces, numFaces):
+	eigenfaces = getEigenfaces(faces)
+	coefficients = faces.reshape([ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ]).dot(eigenfaces)
+	stds = np.std(coefficients, axis=0, keepdims=True)
+	perturbations = eigenfaces.dot(np.random.randn(eigenfaces.shape[1], numFaces) * stds.T).T.reshape([ numFaces, faces.shape[1], faces.shape[2], 1 ])
+	return faces[0:numFaces,:,:,:] + perturbations
 
 def conv2d (x, W):
 	return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
@@ -190,13 +197,21 @@ def trainNN (faces, labels, subjects, e):
 		print "{}: {}".format(testSubject, auc)
 		print ""
 
-def trainSVMRegression (filteredFaces, labels, subjects, C):
-	uniqueSubjects = np.unique(subjects)
+def trainSVMRegression (filteredFaces, labels, subjects, masterK, C):
 	accuracies = []
-	masterK = filteredFaces.dot(filteredFaces.T)
 
-	for i, testSubject in enumerate(uniqueSubjects):
-		trainIdxs = np.nonzero(subjects != testSubject)[0]
+	NUM_FOLDS = 4
+	np.random.seed(0)  # Make sure the folds are always the same
+	uniqueSubjects = np.random.permutation(np.unique(subjects))
+	accuracies = []
+
+	numSubjectsPerFold = int(np.ceil(len(uniqueSubjects) / float(NUM_FOLDS)))
+	for i in range(NUM_FOLDS):
+		firstSubjectIdx = i*numSubjectsPerFold
+		lastSubjectIdx = min((i+1)*numSubjectsPerFold, len(uniqueSubjects))
+		testSubjects = uniqueSubjects[range(firstSubjectIdx, lastSubjectIdx)]
+
+		trainIdxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
 		someFilteredFacesTrain = filteredFaces[trainIdxs]
 		someLabels = labels[trainIdxs]
 		K = masterK[trainIdxs, :]
@@ -217,14 +232,14 @@ def trainSVMRegression (filteredFaces, labels, subjects, C):
 		yhat = lr.predict(features)
 		print np.corrcoef(y, yhat)[0,1]
 
-		testIdxs = np.nonzero(subjects == testSubject)[0]
+		testIdxs = np.nonzero(np.in1d(subjects, testSubjects) == True)[0]
 		someFilteredFaces = filteredFaces[testIdxs]
 		K = masterK[testIdxs, :]
 		K = K[:, trainIdxs]  # I.e., need trainIdxs dotted with testIdxs
 		y = labels[testIdxs]
 		features = []
-		for i in range(len(svms)):
-			yhat = svms[i].decision_function(K)
+		for j in range(len(svms)):
+			yhat = svms[j].decision_function(K)
 			features.append(yhat)
 		features = np.array(features).T
 		yhat = lr.predict(features)
@@ -233,7 +248,7 @@ def trainSVMRegression (filteredFaces, labels, subjects, C):
 			r = np.corrcoef(y, yhat)[0,1]
 		else:
 			r = np.nan
-		print "{}: {}".format(testSubject, r)
+		print "Fold {}: {}".format(i, r)
 		accuracies.append(r)
 	accuracies = np.array(accuracies)
 	accuracies = accuracies[np.isfinite(accuracies)]
@@ -541,20 +556,22 @@ def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 
 if __name__ == "__main__":
-	foldIdx = int(sys.argv[1])
+	C = float(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
 	
-		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		#filterBankF = np.fft.fft2(filterBank)
-		#filteredFaces = filterFaces(faces, filterBankF)
+		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		filterBankF = np.fft.fft2(filterBank)
+		filteredFaces = filterFaces(faces, filterBankF)
+		
+		masterK = filteredFaces.dot(filteredFaces.T)
 
 	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
 	#	print "E={}".format(e)
 	#	#trainSVM(filteredFaces, labels, subjects, e)
 	#	trainNN(faces, labels, subjects, e)
 
-	trainNNRegression(faces, labels, subjects, foldIdx)
-	#trainSVMRegression(filteredFaces, labels, subjects, C)
+	#trainNNRegression(faces, labels, subjects, foldIdx)
+	trainSVMRegression(filteredFaces, labels, subjects, masterK, C)
