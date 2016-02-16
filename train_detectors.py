@@ -10,7 +10,7 @@ import pandas
 from skimage.transform import resize
 
 FACE_SIZE = 48
-NUM_EPOCHS = 20000
+NUM_EPOCHS = 500
 BATCH_SIZE = 128
 
 def resizeFaces (faces, newSize):
@@ -18,20 +18,6 @@ def resizeFaces (faces, newSize):
 	for i in range(faces.shape[0]):
 		newFaces[i,:,:] = resize(faces[i,:,:], (newSize, newSize), preserve_range=True)
 	return newFaces
-
-def getEigenfaces (faces):
-	faces = np.reshape(faces, [ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ]).copy()  # Copy so we don't affect caller's object
-	faces -= np.mean(faces, axis=0, keepdims=True)
-	cov = faces.T.copy().dot(faces)  # Copy so that it's contiguous and thus faster
-	u,s,v = np.linalg.svd(cov)
-	return u[:, 0:NUM_COMPONENTS]
-
-def perturbFaces (faces, numFaces):
-	eigenfaces = getEigenfaces(faces)
-	coefficients = faces.reshape([ faces.shape[0], faces.shape[1]*faces.shape[2]*faces.shape[3] ]).dot(eigenfaces)
-	stds = np.std(coefficients, axis=0, keepdims=True)
-	perturbations = eigenfaces.dot(np.random.randn(eigenfaces.shape[1], numFaces) * stds.T).T.reshape([ numFaces, faces.shape[1], faces.shape[2], 1 ])
-	return faces[0:numFaces,:,:,:] + perturbations
 
 def conv2d (x, W):
 	return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
@@ -153,7 +139,8 @@ def trainNNRegression (faces, labels, subjects, foldIdx):
 		# Normalize
 		test_x = (test_x - mx) / sx
 
-		r = runNNRegression(train_x, train_y, test_x, test_y)
+		r = runFCRegression(train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:])), train_y,
+		                    test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:])), test_y)
 		print "Fold {}: {}".format(i, r)
 		print ""
 
@@ -297,8 +284,11 @@ def weight_variable (shape, stddev = 0.1, wd = 0):
 	tf.add_to_collection("losses", weight_decay)
 	return var
 
-def get_randomly_shifted (faces, cropSize):
+def getRandomlyAltered (faces, cropSize):
 	return faces
+
+	#skimage.util.random_noise(faces[i,:,:].astype(np.int32), mode='speckle', var=0.001)
+
 	#return faces[:, 2:46, 2:46, :]
 	#diff = faces.shape[1] - cropSize
 	#shiftedFaces = np.zeros((faces.shape[0], cropSize, cropSize, faces.shape[3]))
@@ -364,7 +354,10 @@ def evalCorr (x_image, x, y_pred, y, keep_prob):
 	yhat = []
 	for i in range(int(np.ceil(x.shape[0] / float(BATCH_SIZE)))):
 		idxs = range(i*BATCH_SIZE, min((i+1)*BATCH_SIZE, x.shape[0]))
-		someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze()
+		if len(x_image.get_shape()) > 2:
+			someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze()
+		else:
+			someYhat = y_pred.eval({x_image: x[idxs,:], keep_prob: 1.0}).squeeze()
 		yhat += list(someYhat)
 	return np.corrcoef(y.squeeze(), yhat)[0,1]
 
@@ -420,7 +413,7 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
-			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
+			some_train_x = getRandomlyAltered(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
 			some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 			train_step.run({x_image: some_train_x, y_: some_train_y, keep_prob: 0.25})
 			if i % 100 == 0:
@@ -486,7 +479,7 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
-			some_train_x = get_randomly_shifted(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
+			some_train_x = getRandomlyAltered(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
 			train_step.run({x_image: some_train_x, y_: train_y[offset:offset+BATCH_SIZE, :], keep_prob: 0.9})
 			if i % 100 == 0:
 				#print h_pool1.eval({x_image: train_x[0:1, 2:46, 2:46, :], keep_prob: 1.0})
@@ -509,69 +502,76 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 		return auc
 
-def runNN (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
+def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
+	#train_x = np.vstack((train_x, train_x + np.random.randn(*(train_x.shape)) * 0.001 * train_x))
+	#train_y = np.vstack((train_y, train_y))
+
 	BATCH_SIZE = 128
+	NUM_HIDDEN = 8
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
-		x_image = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], train_x.shape[3]])
+		x = tf.placeholder("float", shape=[None, train_x.shape[1]])
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
-		W_conv1 = weight_variable([7, 7, 1, 4])
-		b_conv1 = bias_variable([4])
-		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
-		h_pool1 = max_pool(h_conv1, 8)
-
-		W_fc1 = weight_variable([6 * 6 * 4, 4])
-		b_fc1 = bias_variable([4])
-		h_pool1_flat = tf.reshape(h_pool1, [-1, 6*6*4])
-		h_fc1 = tf.nn.relu(tf.matmul(h_pool1_flat, W_fc1) + b_fc1)
+		W1 = weight_variable([train_x.shape[1], NUM_HIDDEN], stddev=0.01, wd=1e-1)
+		b1 = bias_variable([NUM_HIDDEN])
+		fc1 = tf.nn.relu(tf.matmul(x, W1) + b1)
 
 		keep_prob = tf.placeholder("float")
-		h_fc1_drop = tf.nn.dropout(h_fc1, keep_prob)
-		W_fc2 = weight_variable([4, train_y.shape[1]])
-		b_fc2 = bias_variable([train_y.shape[1]])
+		fc1_drop = tf.nn.dropout(fc1, keep_prob)
 
-		y_conv = tf.nn.softmax(tf.matmul(h_fc1_drop, W_fc2) + b_fc2)
+		W2 = weight_variable([NUM_HIDDEN, 1], wd=1e-1)
+		b2 = bias_variable([1])
+		y_pred = tf.matmul(fc1_drop, W2) + b2
 
-		cross_entropy = -tf.reduce_sum(y_*tf.log(tf.clip_by_value(y_conv,1e-10,1.0)), name='cross_entropy')
-		tf.add_to_collection('losses', cross_entropy)
+		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
+		tf.add_to_collection('losses', l2)
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
-		LEARNING_RATE = 0.1
+		LEARNING_RATE = 1e-5
 		batch = tf.Variable(0)
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/5, 0.99, staircase=True)
+		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
 		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
-			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
-			train_step.run({x_image: train_x[offset:offset+BATCH_SIZE, :, :, :], y_: train_y[offset:offset+BATCH_SIZE, :], keep_prob: 0.5})
-			if i % 10 == 0:
-				print sklearn.metrics.roc_auc_score(train_y[:,1], y_conv.eval({x_image: train_x, keep_prob: 1.0})[:,1])
-			if i % 50 == 0:
-				ll = cross_entropy.eval({x_image: test_x, y_: test_y, keep_prob: 1.0})
-				auc = sklearn.metrics.roc_auc_score(test_y[:,1], y_conv.eval({x_image: test_x, keep_prob: 1.0})[:,1])
-				print "Test LL={} AUC={}".format(ll, auc)
+			for j in range(numBatches):
+				offset = j*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
+				some_train_x = train_x[offset:offset+BATCH_SIZE, :]
+				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
+				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
+
+			print "Epoch {} (lr={})".format(i, learning_rate.eval())
+
+			ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
+			print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x, train_x, y_pred, train_y, keep_prob))
+
+			ll = total_loss.eval({x: test_x, y_: test_y, keep_prob: 1.0})
+			print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x, test_x, y_pred, test_y, keep_prob))
+		r = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 		session.close()
+		return r
 
 if __name__ == "__main__":
-	C = float(sys.argv[1])
+	#C = float(sys.argv[1])
+	foldIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
 	
-		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		filterBankF = np.fft.fft2(filterBank)
-		filteredFaces = filterFaces(faces, filterBankF)
+		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		#filterBankF = np.fft.fft2(filterBank)
+		#filteredFaces = filterFaces(faces, filterBankF)
 		
-		masterK = filteredFaces.dot(filteredFaces.T)
+		#masterK = filteredFaces.dot(filteredFaces.T)
 
 	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
 	#	print "E={}".format(e)
 	#	#trainSVM(filteredFaces, labels, subjects, e)
 	#	trainNN(faces, labels, subjects, e)
 
-	#trainNNRegression(faces, labels, subjects, foldIdx)
-	trainSVMRegression(filteredFaces, labels, subjects, masterK, C)
+	trainNNRegression(faces, labels, subjects, foldIdx)
+	#trainSVMRegression(filteredFaces, labels, subjects, masterK, C)
