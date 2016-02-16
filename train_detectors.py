@@ -506,7 +506,7 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	#train_x = np.vstack((train_x, train_x + np.random.randn(*(train_x.shape)) * 0.001 * train_x))
 	#train_y = np.vstack((train_y, train_y))
 
-	BATCH_SIZE = 128
+	BATCH_SIZE = 512
 	NUM_HIDDEN = 8
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
@@ -521,9 +521,13 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		keep_prob = tf.placeholder("float")
 		fc1_drop = tf.nn.dropout(fc1, keep_prob)
 
-		W2 = weight_variable([NUM_HIDDEN, 1], wd=1e-1)
-		b2 = bias_variable([1])
-		y_pred = tf.matmul(fc1_drop, W2) + b2
+		W2 = weight_variable([NUM_HIDDEN, NUM_HIDDEN/2], stddev=0.01, wd=1e-1)
+		b2 = bias_variable([NUM_HIDDEN/2])
+		fc2 = tf.nn.relu(tf.matmul(fc1_drop, W2) + b2)
+
+		W3 = weight_variable([NUM_HIDDEN/2, 1], wd=1e-1)
+		b3 = bias_variable([1])
+		y_pred = tf.matmul(fc2, W3) + b3
 
 		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
 		tf.add_to_collection('losses', l2)
@@ -533,7 +537,7 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		batch = tf.Variable(0)
 		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
 		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
-		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
+		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.2).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
@@ -543,13 +547,14 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
 
-			print "Epoch {} (lr={})".format(i, learning_rate.eval())
+			if i % 5 == 0:
+				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
-			ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
-			print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x, train_x, y_pred, train_y, keep_prob))
+				ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
+				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x, train_x, y_pred, train_y, keep_prob))
 
-			ll = total_loss.eval({x: test_x, y_: test_y, keep_prob: 1.0})
-			print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x, test_x, y_pred, test_y, keep_prob))
+				ll = total_loss.eval({x: test_x, y_: test_y, keep_prob: 1.0})
+				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x, test_x, y_pred, test_y, keep_prob))
 		r = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
