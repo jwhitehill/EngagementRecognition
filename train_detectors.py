@@ -514,7 +514,7 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	train_x = train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:]))
 	test_x = test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:]))
 
-	NUM_HIDDEN = 4
+	NUM_HIDDEN = 16
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
@@ -523,8 +523,8 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 
 		W1 = weight_variable([train_x.shape[1], NUM_HIDDEN], stddev=0.01, wd=1e-1)
 		b1 = bias_variable([NUM_HIDDEN])
-		fcpre = tf.matmul(x, W1) + b1
-		fc1 = tf.nn.relu(fcpre)
+		fc_pre = tf.matmul(x, W1) + b1
+		fc1 = tf.nn.relu(fc_pre)
 
 		keep_prob = tf.placeholder("float")
 		fc1_drop = tf.nn.dropout(fc1, keep_prob)
@@ -566,11 +566,14 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				r, yhat = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 				print "Test LL(some)={} r(all)={}".format(ll, r)
 
+				print np.corrcoef(W1.eval().T)
+
+				plt.imshow(np.hstack([ np.reshape(W1.eval()[:,idx], [ FACE_SIZE, FACE_SIZE ]) for idx in range(NUM_HIDDEN) ]), cmap='gray')
 				# Show mistakes
-				idxs = np.argsort((yhat - test_y.squeeze()) ** 2)[-10:]
-				print [ yhat[idx] for idx in idxs ]
-				print test_y[idxs].T
-				plt.imshow(np.hstack([ np.reshape(test_x[idx,:], (FACE_SIZE, FACE_SIZE)) for idx in idxs ]), cmap='gray')
+				#idxs = np.argsort((yhat - test_y.squeeze()) ** 2)[-10:]
+				#print [ yhat[idx] for idx in idxs ]
+				#print test_y[idxs].T
+				#plt.imshow(np.hstack([ np.reshape(test_x[idx,:], (FACE_SIZE, FACE_SIZE)) for idx in idxs ]), cmap='gray')
 				plt.show()
 
 		r, _ = evalCorr(x, test_x, y_pred, test_y, keep_prob)
