@@ -1,4 +1,5 @@
 import cPickle
+import skimage.transform
 import sys
 import tensorflow as tf
 import sklearn
@@ -11,7 +12,16 @@ from skimage.transform import resize
 
 FACE_SIZE = 48
 NUM_EPOCHS = 500
-BATCH_SIZE = 128
+BATCH_SIZE = 512
+
+NUM_FOLDS = 4
+NUM_SUBJECTS_PER_FOLD = 5
+SUBJECTS_IN_FOLDS = np.array([
+	"FC22", "FC20", "FC18", "FC21", "FC24",  # Fold 1
+	"FC25", "FO19", "FO21", "FO22", "FO20",  # Fold 2
+	"FO25", "FO24", "FW22", "FW18", "FW21",  # Fold 3
+	"FW24", "FW23", "MC08", "MO07", "MW07"   # Fold 4
+])
 
 def resizeFaces (faces, newSize):
 	newFaces = np.zeros((faces.shape[0], newSize, newSize), dtype=np.float32)
@@ -99,21 +109,13 @@ def getData ():
 	return faces, labels, isVSU, subjects
 
 def trainNNRegression (faces, labels, subjects, foldIdx):
-	faces -= np.tile(np.reshape(np.mean(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
-	faces /= np.tile(np.reshape(np.std(faces, axis=(1,2)), (faces.shape[0], 1, 1)), [1,FACE_SIZE,FACE_SIZE])
-
-	NUM_FOLDS = 4
-	np.random.seed(0)  # Make sure the folds are always the same
-	uniqueSubjects = np.random.permutation(np.unique(subjects))
 	accuracies = []
-
-	numSubjectsPerFold = int(np.ceil(len(uniqueSubjects) / float(NUM_FOLDS)))
 	for i in range(NUM_FOLDS):
 		if i != foldIdx:
 			continue
-		firstSubjectIdx = i*numSubjectsPerFold
-		lastSubjectIdx = min((i+1)*numSubjectsPerFold, len(uniqueSubjects))
-		testSubjects = uniqueSubjects[range(firstSubjectIdx, lastSubjectIdx)]
+		firstSubjectIdx = i*NUM_SUBJECTS_PER_FOLD
+		lastSubjectIdx = min((i+1)*NUM_SUBJECTS_PER_FOLD, len(SUBJECTS_IN_FOLDS))
+		testSubjects = SUBJECTS_IN_FOLDS[range(firstSubjectIdx, lastSubjectIdx)]
 
 		idxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
 		train_x = faces[idxs]
@@ -139,8 +141,8 @@ def trainNNRegression (faces, labels, subjects, foldIdx):
 		# Normalize
 		test_x = (test_x - mx) / sx
 
-		r = runFCRegression(train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:])), train_y,
-		                    test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:])), test_y)
+		r = runFCRegression(train_x, train_y, test_x, test_y)
+		#r = runNNRegression(train_x, train_y, test_x, test_y)
 		print "Fold {}: {}".format(i, r)
 		print ""
 
@@ -186,17 +188,10 @@ def trainNN (faces, labels, subjects, e):
 
 def trainSVMRegression (filteredFaces, labels, subjects, masterK, C):
 	accuracies = []
-
-	NUM_FOLDS = 4
-	np.random.seed(0)  # Make sure the folds are always the same
-	uniqueSubjects = np.random.permutation(np.unique(subjects))
-	accuracies = []
-
-	numSubjectsPerFold = int(np.ceil(len(uniqueSubjects) / float(NUM_FOLDS)))
 	for i in range(NUM_FOLDS):
-		firstSubjectIdx = i*numSubjectsPerFold
-		lastSubjectIdx = min((i+1)*numSubjectsPerFold, len(uniqueSubjects))
-		testSubjects = uniqueSubjects[range(firstSubjectIdx, lastSubjectIdx)]
+		firstSubjectIdx = i*NUM_SUBJECTS_PER_FOLD
+		lastSubjectIdx = min((i+1)*NUM_SUBJECTS_PER_FOLD, len(SUBJECTS_IN_FOLDS))
+		testSubjects = SUBJECTS_IN_FOLDS[range(firstSubjectIdx, lastSubjectIdx)]
 
 		trainIdxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
 		someFilteredFacesTrain = filteredFaces[trainIdxs]
@@ -284,29 +279,36 @@ def weight_variable (shape, stddev = 0.1, wd = 0):
 	tf.add_to_collection("losses", weight_decay)
 	return var
 
-def getRandomlyAltered (faces, cropSize):
-	return faces
+def getRandomlyAltered (faces, replication):
+	DIFF = 4
+	alteredFaces = []
+	for r in range(replication):
+		for i in range(faces.shape[0]):
+			sx = np.random.randint(0, DIFF)
+			sy = np.random.randint(0, DIFF)
+			sw = np.random.randint(0, DIFF)
+			sh = np.random.randint(0, DIFF)
 
-	#skimage.util.random_noise(faces[i,:,:].astype(np.int32), mode='speckle', var=0.001)
+			face = faces[i,sy:FACE_SIZE-sh,sx:FACE_SIZE-sw].squeeze()
+			minval = np.min(face, keepdims=True)
+			maxval = np.max(face, keepdims=True)
+			face = (face - minval) / (maxval - minval)
 
-	#return faces[:, 2:46, 2:46, :]
-	#diff = faces.shape[1] - cropSize
-	#shiftedFaces = np.zeros((faces.shape[0], cropSize, cropSize, faces.shape[3]))
-	#for i in range(faces.shape[0]):
-	#	sx = np.random.randint(0, diff)
-	#	sy = np.random.randint(0, diff)
-	#	if np.random.random() < 0.5:
-	#		shiftedFaces[i,:,:,:] = faces[i, sx:sx+cropSize, sy:sy+cropSize, :]
-	#	else:
-	#		shiftedFaces[i,:,:,:] = np.fliplr(faces[i, sx:sx+cropSize, sy:sy+cropSize, :])
-	#return shiftedFaces
+			if np.random.random() < 0.5:  # Flip left-right
+				face = face[:,::-1]
+			face = skimage.transform.resize(face, [FACE_SIZE, FACE_SIZE])
+
+			face = face * (maxval - minval) + minval
+
+			alteredFaces.append(face)
+			#plt.imshow(np.hstack((face, faces[i,:,:].squeeze()))), plt.show()
+	return np.resize(alteredFaces, [ replication*faces.shape[0], FACE_SIZE, FACE_SIZE, 1 ])
 
 def bias_variable (shape, b=0.1):
 	var = tf.constant(b, shape=shape)
 	return tf.Variable(var)
 
 def runNNRawPixels (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
-	BATCH_SIZE = 128
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
@@ -359,7 +361,7 @@ def evalCorr (x_image, x, y_pred, y, keep_prob):
 		else:
 			someYhat = y_pred.eval({x_image: x[idxs,:], keep_prob: 1.0}).squeeze()
 		yhat += list(someYhat)
-	return np.corrcoef(y.squeeze(), yhat)[0,1]
+	return np.corrcoef(y.squeeze(), yhat)[0,1], yhat
 
 def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	with tf.Graph().as_default():
@@ -404,6 +406,7 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
 		#train_step = tf.train.GradientDescentOptimizer(learning_rate=.01).minimize(total_loss)
+		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
 		LEARNING_RATE = 0.0001
 		batch = tf.Variable(0)
 		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/10, 0.9, staircase=True)
@@ -412,23 +415,24 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
-			offset = i*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
-			some_train_x = getRandomlyAltered(train_x[offset:offset+BATCH_SIZE, :, :, :], 44)
-			some_train_y = train_y[offset:offset+BATCH_SIZE, :]
-			train_step.run({x_image: some_train_x, y_: some_train_y, keep_prob: 0.25})
-			if i % 100 == 0:
-				ll = total_loss.eval({x_image: some_train_x[:, :, :, :], y_: some_train_y, keep_prob: 1.0})
+			for j in range(numBatches):
+				offset = j*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
+				some_train_x = train_x[offset:offset+BATCH_SIZE, :, :, :]
+				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
+				train_step.run({x_image: some_train_x, y_: some_train_y, keep_prob: 0.25})
+			if i % 25 == 0:
+				print "Epoch {} (lr={})".format(i, learning_rate.eval())
+
+				ll = total_loss.eval({x_image: train_x, y_: train_y, keep_prob: 1.0})
 				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x_image, train_x, y_pred, train_y, keep_prob))
 
-				ll = total_loss.eval({x_image: test_x[:, :, :, :], y_: test_y, keep_prob: 1.0})
+				ll = total_loss.eval({x_image: test_x, y_: test_y, keep_prob: 1.0})
 				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x_image, test_x, y_pred, test_y, keep_prob))
-
 		r = evalCorr(x_image, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
 
 def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
-	BATCH_SIZE = 128
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
@@ -503,11 +507,14 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		return auc
 
 def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
-	#train_x = np.vstack((train_x, train_x + np.random.randn(*(train_x.shape)) * 0.001 * train_x))
-	#train_y = np.vstack((train_y, train_y))
+	REPLICATION = 2
+	train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
+	train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
 
-	BATCH_SIZE = 512
-	NUM_HIDDEN = 8
+	train_x = train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:]))
+	test_x = test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:]))
+
+	NUM_HIDDEN = 4
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
@@ -516,12 +523,13 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 
 		W1 = weight_variable([train_x.shape[1], NUM_HIDDEN], stddev=0.01, wd=1e-1)
 		b1 = bias_variable([NUM_HIDDEN])
-		fc1 = tf.nn.relu(tf.matmul(x, W1) + b1)
+		fcpre = tf.matmul(x, W1) + b1
+		fc1 = tf.nn.relu(fcpre)
 
 		keep_prob = tf.placeholder("float")
 		fc1_drop = tf.nn.dropout(fc1, keep_prob)
 
-		W2 = weight_variable([NUM_HIDDEN, NUM_HIDDEN/2], stddev=0.01, wd=1e-1)
+		W2 = weight_variable([NUM_HIDDEN, NUM_HIDDEN/2], stddev=NUM_HIDDEN ** 0.5, wd=1e-1)
 		b2 = bias_variable([NUM_HIDDEN/2])
 		fc2 = tf.nn.relu(tf.matmul(fc1_drop, W2) + b2)
 
@@ -536,7 +544,7 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		LEARNING_RATE = 1e-5
 		batch = tf.Variable(0)
 		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.75, staircase=False)
 		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.2).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
@@ -547,15 +555,25 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
 
-			if i % 5 == 0:
+			if i % 25 == 0:
 				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
 				ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
-				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x, train_x, y_pred, train_y, keep_prob))
+				r, _ = evalCorr(x, train_x, y_pred, train_y, keep_prob)
+				print "Train LL(some)={} r(all)={}".format(ll, r)
 
 				ll = total_loss.eval({x: test_x, y_: test_y, keep_prob: 1.0})
-				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x, test_x, y_pred, test_y, keep_prob))
-		r = evalCorr(x, test_x, y_pred, test_y, keep_prob)
+				r, yhat = evalCorr(x, test_x, y_pred, test_y, keep_prob)
+				print "Test LL(some)={} r(all)={}".format(ll, r)
+
+				# Show mistakes
+				idxs = np.argsort((yhat - test_y.squeeze()) ** 2)[-10:]
+				print [ yhat[idx] for idx in idxs ]
+				print test_y[idxs].T
+				plt.imshow(np.hstack([ np.reshape(test_x[idx,:], (FACE_SIZE, FACE_SIZE)) for idx in idxs ]), cmap='gray')
+				plt.show()
+
+		r, _ = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
 
@@ -572,11 +590,6 @@ if __name__ == "__main__":
 		#filteredFaces = filterFaces(faces, filterBankF)
 		
 		#masterK = filteredFaces.dot(filteredFaces.T)
-
-	#for e in [ 1, 2, 3, 4 ]:  # Engagement label
-	#	print "E={}".format(e)
-	#	#trainSVM(filteredFaces, labels, subjects, e)
-	#	trainNN(faces, labels, subjects, e)
 
 	trainNNRegression(faces, labels, subjects, foldIdx)
 	#trainSVMRegression(filteredFaces, labels, subjects, masterK, C)
