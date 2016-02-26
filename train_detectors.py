@@ -186,7 +186,35 @@ def trainNN (faces, labels, subjects, e):
 		print "{}: {}".format(testSubject, auc)
 		print ""
 
-def trainSVMRegression (filteredFaces, labels, subjects, masterK, C):
+def trainOneSVM (masterK, y, subjects):
+	Cs = 10. ** np.arange(-5, +5)/2.
+	_, subjectIdxs = np.unique(subjects, return_inverse=True)
+	uniqueSubjects = np.unique(subjects)
+	highestAccuracy = - float('inf')
+	NUM_MINI_FOLDS = 4
+	for C in Cs:  # For each regularization value
+		print "C={}".format(C)
+		accuracies = []
+		for i in range(NUM_MINI_FOLDS):  # For each test subject
+			testIdxs = np.nonzero(subjectIdxs % NUM_MINI_FOLDS == i)[0]
+			trainIdxs = np.nonzero(subjectIdxs % NUM_MINI_FOLDS != i)[0]
+			if len(np.unique(y[testIdxs])) > 1:
+				K = masterK[trainIdxs, :]
+				K = K[:, trainIdxs]
+				svm = sklearn.svm.SVC(kernel="precomputed", C=C)
+				svm.fit(K, y[trainIdxs])
+
+				K = masterK[testIdxs, :]
+				K = K[:, trainIdxs]  # I.e., need trainIdxs dotted with testIdxs
+				accuracy = sklearn.metrics.roc_auc_score(y[testIdxs], svm.decision_function(K))
+				print accuracy
+				accuracies.append(accuracies)
+		if np.mean(accuracies) > highestAccuracy:
+			highestAccuracy = np.mean(accuracies)
+			bestSvm = svm
+	return bestSvm
+
+def trainSVMRegression (filteredFaces, labels, subjects, masterK):
 	accuracies = []
 	for i in range(NUM_FOLDS):
 		firstSubjectIdx = i*NUM_SUBJECTS_PER_FOLD
@@ -196,15 +224,16 @@ def trainSVMRegression (filteredFaces, labels, subjects, masterK, C):
 		trainIdxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
 		someFilteredFacesTrain = filteredFaces[trainIdxs]
 		someLabels = labels[trainIdxs]
+		someSubjects = subjects[trainIdxs]
 		K = masterK[trainIdxs, :]
 		K = K[:, trainIdxs]
 
 		svms = []
 		features = []
 		for e in range(1, 5):
+			print "Training SVM for E={}".format(e)
 			y = someLabels == e
-			svm = sklearn.svm.SVC(kernel="precomputed", C=C)
-			svm.fit(K, y)
+			svm = trainOneSVM(K, y, someSubjects)
 			svms.append(svm)
 			yhat = svm.decision_function(K)
 			features.append(yhat)
@@ -511,19 +540,28 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
 	train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
 
-	train_x = train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:]))
-	test_x = test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:]))
+	train_x = train_x.reshape(train_x.shape)
+	test_x = test_x.reshape(test_x.shape)
 
 	NUM_HIDDEN = 16
+	NUM_FILTERS1 = 4
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
-		x = tf.placeholder("float", shape=[None, train_x.shape[1]])
+		x = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], 1])
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
-		W1 = weight_variable([train_x.shape[1], NUM_HIDDEN], stddev=0.01, wd=1e-1)
+		# Conv1
+		W_conv1 = weight_variable([5, 5, 1, NUM_FILTERS1], stddev=0.01)
+		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
+		h_conv1 = tf.nn.relu(conv2d(x, W_conv1) + b_conv1)
+		# Pool
+		h_pool1 = max_pool(h_conv1, 2)
+		h_pool1_reshaped = tf.reshape(h_pool1, [-1, NUM_FILTERS1*(FACE_SIZE/2)*(FACE_SIZE/2)])
+
+		W1 = weight_variable([NUM_FILTERS1*(FACE_SIZE/2)*(FACE_SIZE/2), NUM_HIDDEN], stddev=0.01, wd=1e-1)
 		b1 = bias_variable([NUM_HIDDEN])
-		fc_pre = tf.matmul(x, W1) + b1
+		fc_pre = tf.matmul(h_pool1_reshaped, W1) + b1
 		fc1 = tf.nn.relu(fc_pre)
 
 		keep_prob = tf.placeholder("float")
@@ -544,18 +582,19 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		LEARNING_RATE = 1e-5
 		batch = tf.Variable(0)
 		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.75, staircase=False)
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
 		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.2).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			for j in range(numBatches):
+				print j, numBatches
 				offset = j*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 				some_train_x = train_x[offset:offset+BATCH_SIZE, :]
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
 
-			if i % 25 == 0:
+			if i % 1 == 0:
 				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
 				ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
@@ -566,33 +605,32 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				r, yhat = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 				print "Test LL(some)={} r(all)={}".format(ll, r)
 
-				print np.corrcoef(W1.eval().T)
+				#print np.corrcoef(W1.eval().T)
 
-				plt.imshow(np.hstack([ np.reshape(W1.eval()[:,idx], [ FACE_SIZE, FACE_SIZE ]) for idx in range(NUM_HIDDEN) ]), cmap='gray')
+				#plt.imshow(np.hstack([ np.reshape(W1.eval()[:,idx], [ FACE_SIZE, FACE_SIZE ]) for idx in range(NUM_HIDDEN) ]), cmap='gray')
 				# Show mistakes
 				#idxs = np.argsort((yhat - test_y.squeeze()) ** 2)[-10:]
 				#print [ yhat[idx] for idx in idxs ]
 				#print test_y[idxs].T
 				#plt.imshow(np.hstack([ np.reshape(test_x[idx,:], (FACE_SIZE, FACE_SIZE)) for idx in idxs ]), cmap='gray')
-				plt.show()
+				#plt.show()
 
 		r, _ = evalCorr(x, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
 
 if __name__ == "__main__":
-	#C = float(sys.argv[1])
-	foldIdx = int(sys.argv[1])
+	#foldIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
 	
-		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		#filterBankF = np.fft.fft2(filterBank)
-		#filteredFaces = filterFaces(faces, filterBankF)
+		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		filterBankF = np.fft.fft2(filterBank)
+		filteredFaces = filterFaces(faces, filterBankF)
 		
-		#masterK = filteredFaces.dot(filteredFaces.T)
+		masterK = filteredFaces.dot(filteredFaces.T)
 
-	trainNNRegression(faces, labels, subjects, foldIdx)
-	#trainSVMRegression(filteredFaces, labels, subjects, masterK, C)
+	#trainNNRegression(faces, labels, subjects, foldIdx)
+	trainSVMRegression(filteredFaces, labels, subjects, masterK)
