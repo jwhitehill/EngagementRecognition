@@ -187,7 +187,7 @@ def trainNN (faces, labels, subjects, e):
 		print ""
 
 def trainOneSVM (masterK, y, subjects):
-	Cs = 10. ** np.arange(-5, +5)/2.
+	Cs = 1. / np.array([ 0.1, 0.5, 2.5, 12.5, 62.5, 312.5 ])
 	_, subjectIdxs = np.unique(subjects, return_inverse=True)
 	uniqueSubjects = np.unique(subjects)
 	highestAccuracy = - float('inf')
@@ -208,11 +208,13 @@ def trainOneSVM (masterK, y, subjects):
 				K = K[:, trainIdxs]  # I.e., need trainIdxs dotted with testIdxs
 				accuracy = sklearn.metrics.roc_auc_score(y[testIdxs], svm.decision_function(K))
 				print accuracy
-				accuracies.append(accuracies)
+				accuracies.append(accuracy)
 		if np.mean(accuracies) > highestAccuracy:
 			highestAccuracy = np.mean(accuracies)
-			bestSvm = svm
-	return bestSvm
+			bestC = C
+	svm = sklearn.svm.SVC(kernel="precomputed", C=bestC)
+	svm.fit(masterK, y)
+	return svm
 
 def trainSVMRegression (filteredFaces, labels, subjects, masterK):
 	accuracies = []
@@ -625,6 +627,11 @@ if __name__ == "__main__":
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
+		idxs = np.random.permutation(len(faces))
+		#faces = faces[idxs[0:500]]
+		#labels = labels[idxs[0:500]]
+		#isVSU = isVSU[idxs[0:500]]
+		#subjects = subjects[idxs[0:500]]
 	
 		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
 		filterBankF = np.fft.fft2(filterBank)
