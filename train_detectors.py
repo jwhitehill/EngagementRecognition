@@ -14,14 +14,15 @@ FACE_SIZE = 48
 NUM_EPOCHS = 500
 BATCH_SIZE = 512
 
-NUM_FOLDS = 4
-NUM_SUBJECTS_PER_FOLD = 5
 SUBJECTS_IN_FOLDS = np.array([
 	"FC22", "FC20", "FC18", "FC21", "FC24",  # Fold 1
 	"FC25", "FO19", "FO21", "FO22", "FO20",  # Fold 2
 	"FO25", "FO24", "FW22", "FW18", "FW21",  # Fold 3
 	"FW24", "FW23", "MC08", "MO07", "MW07"   # Fold 4
 ])
+#NUM_FOLDS = len(SUBJECTS_IN_FOLDS)
+NUM_FOLDS = 4
+NUM_SUBJECTS_PER_FOLD = len(SUBJECTS_IN_FOLDS)/NUM_FOLDS
 
 def resizeFaces (faces, newSize):
 	newFaces = np.zeros((faces.shape[0], newSize, newSize), dtype=np.float32)
@@ -188,12 +189,13 @@ def trainNN (faces, labels, subjects, e):
 
 def trainOneSVM (masterK, y, subjects):
 	Cs = 1. / np.array([ 0.1, 0.5, 2.5, 12.5, 62.5, 312.5 ])
+	#Cs = 10. ** np.arange(-5, +6)/2.
 	_, subjectIdxs = np.unique(subjects, return_inverse=True)
 	uniqueSubjects = np.unique(subjects)
 	highestAccuracy = - float('inf')
 	NUM_MINI_FOLDS = 4
 	for C in Cs:  # For each regularization value
-		print "C={}".format(C)
+		#print "C={}".format(C)
 		accuracies = []
 		for i in range(NUM_MINI_FOLDS):  # For each test subject
 			testIdxs = np.nonzero(subjectIdxs % NUM_MINI_FOLDS == i)[0]
@@ -207,7 +209,7 @@ def trainOneSVM (masterK, y, subjects):
 				K = masterK[testIdxs, :]
 				K = K[:, trainIdxs]  # I.e., need trainIdxs dotted with testIdxs
 				accuracy = sklearn.metrics.roc_auc_score(y[testIdxs], svm.decision_function(K))
-				print accuracy
+				#print accuracy
 				accuracies.append(accuracy)
 		if np.mean(accuracies) > highestAccuracy:
 			highestAccuracy = np.mean(accuracies)
@@ -216,7 +218,7 @@ def trainOneSVM (masterK, y, subjects):
 	svm.fit(masterK, y)
 	return svm
 
-def trainSVMRegression (filteredFaces, labels, subjects, masterK):
+def trainSVMRegression (filteredFaces, labels, subjects, masterK, alpha):
 	accuracies = []
 	for i in range(NUM_FOLDS):
 		firstSubjectIdx = i*NUM_SUBJECTS_PER_FOLD
@@ -231,31 +233,31 @@ def trainSVMRegression (filteredFaces, labels, subjects, masterK):
 		K = K[:, trainIdxs]
 
 		svms = []
-		features = []
+		featuresTrain = []
 		for e in range(1, 5):
 			print "Training SVM for E={}".format(e)
 			y = someLabels == e
 			svm = trainOneSVM(K, y, someSubjects)
 			svms.append(svm)
 			yhat = svm.decision_function(K)
-			features.append(yhat)
-		features = np.array(features).T
-		lr = sklearn.linear_model.LinearRegression()
-		lr.fit(features, y)
-		yhat = lr.predict(features)
+			featuresTrain.append(yhat)
+		featuresTrain = np.array(featuresTrain).T
+		lr = sklearn.linear_model.Ridge(normalize=True, fit_intercept=True, alpha=alpha)
+		lr.fit(featuresTrain, y)
+		print lr.coef_
+		yhat = lr.predict(featuresTrain)
 		print np.corrcoef(y, yhat)[0,1]
 
 		testIdxs = np.nonzero(np.in1d(subjects, testSubjects) == True)[0]
-		someFilteredFaces = filteredFaces[testIdxs]
 		K = masterK[testIdxs, :]
 		K = K[:, trainIdxs]  # I.e., need trainIdxs dotted with testIdxs
 		y = labels[testIdxs]
-		features = []
+		featuresTest = []
 		for j in range(len(svms)):
 			yhat = svms[j].decision_function(K)
-			features.append(yhat)
-		features = np.array(features).T
-		yhat = lr.predict(features)
+			featuresTest.append(yhat)
+		featuresTest = np.array(featuresTest).T
+		yhat = lr.predict(featuresTest)
 
 		if len(np.unique(y)) > 1:
 			r = np.corrcoef(y, yhat)[0,1]
@@ -263,6 +265,11 @@ def trainSVMRegression (filteredFaces, labels, subjects, masterK):
 			r = np.nan
 		print "Fold {}: {}".format(i, r)
 		accuracies.append(r)
+		
+		for j in range(len(svms)):
+			if len(np.unique(y==j+1)) > 1:
+				print "AUC for E={}: {}".format(j, sklearn.metrics.roc_auc_score(y==j+1, featuresTest[:,j]))
+
 	accuracies = np.array(accuracies)
 	accuracies = accuracies[np.isfinite(accuracies)]
 	print np.mean(accuracies), np.median(accuracies)
@@ -622,7 +629,7 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		return r
 
 if __name__ == "__main__":
-	#foldIdx = int(sys.argv[1])
+	foldIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
@@ -639,5 +646,5 @@ if __name__ == "__main__":
 		
 		masterK = filteredFaces.dot(filteredFaces.T)
 
-	#trainNNRegression(faces, labels, subjects, foldIdx)
-	trainSVMRegression(filteredFaces, labels, subjects, masterK)
+	trainNNRegression(faces, labels, subjects, foldIdx)
+	#trainSVMRegression(filteredFaces, labels, subjects, masterK, 1e2)
