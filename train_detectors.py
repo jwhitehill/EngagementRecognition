@@ -11,8 +11,8 @@ import numpy as np
 import pandas
 from skimage.transform import resize
 
-FACE_SIZE = 36
-NUM_EPOCHS = 500
+FACE_SIZE = 48
+NUM_EPOCHS = 10
 BATCH_SIZE = 512
 
 SUBJECTS_IN_FOLDS = np.array([
@@ -126,7 +126,8 @@ def trainNNRegression (faces, labels, subjects, foldIdx):
 		testSubjects = SUBJECTS_IN_FOLDS[range(firstSubjectIdx, lastSubjectIdx)]
 
 		idxs = np.nonzero(np.in1d(subjects, testSubjects) == False)[0]
-		train_x = faces[idxs, :]
+		train_x = faces[idxs]
+		train_x = np.reshape(train_x, train_x.shape + (1,))
 		someLabels = labels[idxs]
 		train_y = np.atleast_2d(someLabels).T.astype(np.float32)
 		mx = np.mean(train_x, axis=0, keepdims=True)
@@ -142,6 +143,7 @@ def trainNNRegression (faces, labels, subjects, foldIdx):
 
 		idxs = np.nonzero(np.in1d(subjects, testSubjects) == True)[0]
 		test_x = faces[idxs]
+		test_x = np.reshape(test_x, test_x.shape + (1,))
 		someLabels = labels[idxs]
 		test_y = np.atleast_2d(someLabels).T.astype(np.float32)
 		# Normalize
@@ -548,57 +550,64 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 
 def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	REPLICATION = 2
-	#train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
-	#train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
 
-	NUM_HIDDEN = 16
-	NUM_FILTERS1 = 4
-	with tf.Graph().as_default():
-		session = tf.InteractiveSession()
+	train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
+	train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
 
-		x = tf.placeholder("float", shape=[None, train_x.shape[1]])
-		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
+	train_x = train_x.reshape(train_x.shape)
+	test_x = test_x.reshape(test_x.shape)
+ 
+        NUM_HIDDEN = 4
+        NUM_FILTERS1 = 4
+        with tf.Graph().as_default():
+                session = tf.InteractiveSession()
+ 
+		x = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], 1])
+                y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
+ 
+		# Conv1
+		W_conv1 = weight_variable([5, 5, 1, NUM_FILTERS1], stddev=0.01)
+		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
+		h_conv1 = tf.nn.relu(conv2d(x, W_conv1) + b_conv1)
+		# Pool
+		h_pool1 = max_pool(h_conv1, 2)
+		h_pool1_reshaped = tf.reshape(h_pool1, [-1, NUM_FILTERS1*(FACE_SIZE/2)*(FACE_SIZE/2)])
 
-		#W1 = weight_variable([NUM_FILTERS1*(FACE_SIZE/2)*(FACE_SIZE/2), NUM_HIDDEN], stddev=0.01, wd=1e-1)
-		#b1 = bias_variable([NUM_HIDDEN])
-		#fc_pre = tf.matmul(h_pool1_reshaped, W1) + b1
+		W1 = weight_variable([NUM_FILTERS1*(FACE_SIZE/2)*(FACE_SIZE/2), NUM_HIDDEN], stddev=0.001)
+		b1 = bias_variable([NUM_HIDDEN])
+		fc_pre = tf.matmul(h_pool1_reshaped, W1) + b1
 		#fc1 = tf.nn.relu(fc_pre)
+ 
+                #keep_prob = tf.placeholder("float")
+		#fc1_drop = tf.nn.dropout(fc1, keep_prob)
+		#W2 = weight_variable([NUM_HIDDEN, 1], stddev=NUM_HIDDEN ** 0.5)
+		#b2 = bias_variable([1])
+		#fc2 = tf.matmul(fc1_drop, W2) + b2
 
-		keep_prob = tf.placeholder("float")
-		fc1_drop = tf.nn.dropout(x, keep_prob)
+		y_pred = fc_pre
 
-		#W2 = weight_variable([NUM_HIDDEN, NUM_HIDDEN/2], stddev=NUM_HIDDEN ** 0.5, wd=1e-1)
-		#b2 = bias_variable([NUM_HIDDEN/2])
-		#fc2 = tf.nn.relu(tf.matmul(fc1_drop, W2) + b2)
-
-		W3 = weight_variable([train_x.shape[1], 1], stddev=1e-3)
-		b3 = bias_variable([1], b=1.)
-		y_pred = tf.matmul(fc1_drop, W3) + b3
-
-		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
-		tf.add_to_collection('losses', l2)
-		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
-
+                l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
+                tf.add_to_collection('losses', l2)
+                total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+ 
 		LEARNING_RATE = 1e-6
-		batch = tf.Variable(0)
-		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
-		#train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.05).minimize(total_loss, global_step=batch)
-		train_step = tf.train.AdamOptimizer(learning_rate=LEARNING_RATE).minimize(total_loss)
+                batch = tf.Variable(0)
+                numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
+                learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
+		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.1).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
 		for i in range(numEpochs):
 			for j in range(numBatches):
-				print j, numBatches
+				#print j, numBatches
 				offset = j*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 				some_train_x = train_x[offset:offset+BATCH_SIZE, :]
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
 				ll = total_loss.eval({x: some_train_x, y_: some_train_y, keep_prob: 1.0})
 				print ll
-				print y_pred.eval({x: train_x[0:10, :], keep_prob:1.0})
 
-			if i % 10 == 0:
+			if i % 1 == 0:
 				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
 				ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
@@ -624,21 +633,21 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		return r
 
 if __name__ == "__main__":
-	#foldIdx = int(sys.argv[1])
+	foldIdx = int(sys.argv[1])
 
 	if 'faces' not in globals():
 		#faces, labels, isVSU, subjects = getData()
 		faces, labels, isVSU, subjects = getDataFast()
 		idxs = np.random.permutation(len(faces))
 	
-		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		filterBankF = np.fft.fft2(filterBank)
-		filteredFaces = filterFaces(faces, filterBankF)
+		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		#filterBankF = np.fft.fft2(filterBank)
+		#filteredFaces = filterFaces(faces, filterBankF)
 		
-		masterK = filteredFaces.dot(filteredFaces.T)
+		#masterK = filteredFaces.dot(filteredFaces.T)
 
-	#trainNNRegression(filteredFaces, labels, subjects, foldIdx)
-	alphas = 10. ** np.arange(-2, +3)
-	for alpha in alphas:
-		print alpha
-		trainSVMRegression(labels, subjects, masterK, alpha)
+	trainNNRegression(faces, labels, subjects, foldIdx)
+	#alphas = 10. ** np.arange(-2, +3)
+	#for alpha in alphas:
+	#	print alpha
+	#	trainSVMRegression(labels, subjects, masterK, alpha)
