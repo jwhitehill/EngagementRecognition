@@ -6,6 +6,7 @@ def makeGaborKernel (n, freq, orient, bwFreq, bwOrient):
 	a = C*(powBwFreq-1.)/(powBwFreq+1.)*freq
 	b = C*np.tan(bwOrient/2)*freq
 	kNorm = a*b
+	cMean = np.exp(-np.pi/a*freq/a*freq)
 
 	kernel = np.zeros((n, n), dtype=np.complex64)
 	for r in range(n):
@@ -13,9 +14,9 @@ def makeGaborKernel (n, freq, orient, bwFreq, bwOrient):
 			x = (np.cos(orient)*(c-(n-1)/2.) + np.sin(orient)*(r-(n-1)/2.))
 			y = (-np.sin(orient)*(c-(n-1)/2.) + np.cos(orient)*(r-(n-1)/2.))
 			ux = freq * x
-			kernel[r,c] = np.exp(-np.pi*(x*x*a*a+y*y*b*b) + 2*np.pi*ux*1j)
-	return kernel
-
+			kernel[r,c] = np.exp(-np.pi*(x*x*a*a+y*y*b*b) + 2*np.pi*ux*1j) - \
+			              cMean*np.exp(-np.pi*(x*x*a*a+y*y*b*b))*kNorm
+	return kernel / np.linalg.norm(np.abs(kernel))
 
 def makeGaborFilterBank (n):
 	bank = []

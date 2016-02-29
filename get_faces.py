@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import scipy.misc
 import re
 
-filenameRE = re.compile(r'\/Users\/jaw291\/Projects\/EngagementRecognition\/\/([^\t]*)')  # "\t*" -- I accidentally included extra tabs
+#filenameRE = re.compile(r'\/Users\/jaw291\/Projects\/EngagementRecognition\/\/([^\t]*)')  # "\t*" -- I accidentally included extra tabs
+filenameRE = re.compile(r'.*\/frames\/')  # "\t*" -- I accidentally included extra tabs
 faceRE = re.compile(r'\(Face (\d+) (\d+) (\d+) (\d+)\) .*')
 
 def decodeFace (lines):
@@ -31,7 +32,8 @@ if __name__ == "__main__":
 			break
 		m = filenameRE.match(line)
 		if m != None:
-			partialFilename = m.group(1)
+			#partialFilename = m.group(1)
+			partialFilename = line
 			line = f.readline()
 			if line[0] == '[':
 				lines = [ line ]
@@ -46,4 +48,5 @@ if __name__ == "__main__":
 					print idx
 			else:  # Not an image, so backtrack 1 line
 				f.seek(-len(line),1)
-	cPickle.dump((faces.keys(), np.array(faces.values()).astype(np.float32)), open("faces.pkl", "wb"))
+	cPickle.dump(faces.keys())
+	np.save("thefaces.npy", np.array(faces.values()).astype(np.float32))
