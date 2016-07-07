@@ -12,7 +12,7 @@ import pandas
 from skimage.transform import resize
 
 FACE_SIZE = 48
-NUM_EPOCHS = 10
+NUM_EPOCHS = 100
 BATCH_SIZE = 512
 
 SUBJECTS_IN_FOLDS = np.array([
@@ -149,8 +149,8 @@ def trainNNRegression (faces, labels, subjects, foldIdx):
 		# Normalize
 		test_x = (test_x - mx) / sx
 
-		r = runFCRegression(train_x, train_y, test_x, test_y)
-		#r = runNNRegression(train_x, train_y, test_x, test_y)
+		#r = runFCRegression(train_x, train_y, test_x, test_y)
+		r = runNNRegression(train_x, train_y, test_x, test_y)
 		print "Fold {}: {}".format(i, r)
 		print ""
 
@@ -313,9 +313,9 @@ def weight_variable (shape, stddev = 0.1, wd = 0):
 	values = np.reshape(values, [ np.prod(shape[0:-1]), shape[-1] ])
 	u,s,v = np.linalg.svd(values, full_matrices=False)
 	u = np.reshape(u, shape)
-
-	#var = tf.Variable(tf.truncated_normal(shape, stddev=stddev))
 	var = tf.Variable(u)
+	
+	#var = tf.Variable(tf.truncated_normal(shape, stddev=stddev))
 
 	weight_decay = tf.mul(tf.nn.l2_loss(var), wd)
 	tf.add_to_collection("losses", weight_decay)
@@ -394,16 +394,32 @@ def runNNRawPixels (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		session.close()
 		return auc
 
-def evalCorr (x_image, x, y_pred, y, keep_prob):
+def evalCorr (x_image, x, y_pred, y, keep_prob = None):
 	yhat = []
 	for i in range(int(np.ceil(x.shape[0] / float(BATCH_SIZE)))):
 		idxs = range(i*BATCH_SIZE, min((i+1)*BATCH_SIZE, x.shape[0]))
 		if len(x_image.get_shape()) > 2:
-			someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze()
+			if keep_prob == None:
+				someYhat = y_pred.eval({x_image: x[idxs,:,:,:]}).squeeze()
+			else:
+				someYhat = y_pred.eval({x_image: x[idxs,:,:,:], keep_prob: 1.0}).squeeze()
 		else:
 			someYhat = y_pred.eval({x_image: x[idxs,:], keep_prob: 1.0}).squeeze()
 		yhat += list(someYhat)
 	return np.corrcoef(y.squeeze(), yhat)[0,1], yhat
+
+def spatial_lrn (tensor, radius=5, bias=1.0, alpha=1.0, beta=0.5):
+	squared = tf.square(tensor)
+	in_channels = tensor.get_shape().as_list()[3]
+	kernel = tf.constant(1.0, shape=[radius, radius, in_channels, 1])
+	squared_sum = tf.nn.depthwise_conv2d(squared,
+	                                     kernel,
+	                                     [1, 1, 1, 1],
+	                                     padding='SAME')
+	bias = tf.constant(bias, dtype=tf.float32)
+	alpha = tf.constant(alpha, dtype=tf.float32)
+	beta = tf.constant(beta, dtype=tf.float32)
+	return tensor / tf.pow((bias + alpha * squared_sum), beta)
 
 def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 	with tf.Graph().as_default():
@@ -412,11 +428,15 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		x_image = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], train_x.shape[3]])
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
+		# LRN
+		#x_normed = spatial_lrn(x_image)
+		x_normed = x_image
+
 		# Conv1
 		NUM_FILTERS1 = 16
 		W_conv1 = weight_variable([5, 5, 1, NUM_FILTERS1], stddev=0.01)
 		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
-		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
+		h_conv1 = tf.nn.relu(conv2d(x_normed, W_conv1) + b_conv1)
 		# Pool
 		h_pool1 = max_pool(h_conv1, 2)
 
@@ -440,16 +460,17 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		W1 = weight_variable([ (FACE_SIZE/4)*(FACE_SIZE/4)*NUM_FILTERS2, train_y.shape[1] ], stddev=0.01, wd=1e-2)
 		b1 = bias_variable([ train_y.shape[1] ], b=0.)
 		fc1 = tf.matmul(h_pool1_drop, W1) + b1
-		y_pred = 1. + 3*tf.sigmoid(fc1)
+		#y_pred = 1. + 3*tf.sigmoid(fc1)
+		y_pred = fc1
 		#y_pred = tf.maximum(tf.constant(1.), tf.minimum(tf.constant(4.), fc1))
 
-		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
+		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2') / BATCH_SIZE
 		tf.add_to_collection('losses', l2)
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
 		#train_step = tf.train.GradientDescentOptimizer(learning_rate=.01).minimize(total_loss)
 		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
-		LEARNING_RATE = 0.0001
+		LEARNING_RATE = 0.002
 		batch = tf.Variable(0)
 		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS/10, 0.9, staircase=True)
 		#train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.5).minimize(total_loss, global_step=batch)
@@ -462,14 +483,14 @@ def runNNRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				some_train_x = train_x[offset:offset+BATCH_SIZE, :, :, :]
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
 				train_step.run({x_image: some_train_x, y_: some_train_y, keep_prob: 0.25})
-			if i % 25 == 0:
+			if i % 5 == 0:
 				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
 				ll = total_loss.eval({x_image: train_x, y_: train_y, keep_prob: 1.0})
-				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x_image, train_x, y_pred, train_y, keep_prob))
+				print "Train LL(some)={} r(all)={}".format(ll, evalCorr(x_image, train_x, y_pred, train_y, keep_prob)[0])
 
 				ll = total_loss.eval({x_image: test_x, y_: test_y, keep_prob: 1.0})
-				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x_image, test_x, y_pred, test_y, keep_prob))
+				print "Test LL(some)={} r(all)={}".format(ll, evalCorr(x_image, test_x, y_pred, test_y, keep_prob)[0])
 		r = evalCorr(x_image, test_x, y_pred, test_y, keep_prob)
 		session.close()
 		return r
@@ -549,44 +570,48 @@ def runNNSimple (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 		return auc
 
 def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
-	REPLICATION = 2
-	train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
-	train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
+	#REPLICATION = 2
+	#train_x = np.vstack((train_x, getRandomlyAltered(train_x, REPLICATION)))
+	#train_y = np.vstack((train_y, np.tile(train_y, (REPLICATION,1))))
 
-	train_x = train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:]))
-	test_x = test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:]))
+	#train_x = train_x.reshape(train_x.shape[0], np.prod(train_x.shape[1:]))
+	#test_x = test_x.reshape(test_x.shape[0], np.prod(test_x.shape[1:]))
 
-	NUM_HIDDEN = 16
 	with tf.Graph().as_default():
 		session = tf.InteractiveSession()
 
-		x = tf.placeholder("float", shape=[None, train_x.shape[1]])
+		x_image = tf.placeholder("float", shape=[None, train_x.shape[1], train_x.shape[2], train_x.shape[3]])
 		y_ = tf.placeholder("float", shape=[None, train_y.shape[1]])
 
-		W1 = weight_variable([train_x.shape[1], NUM_HIDDEN], stddev=0.01, wd=1e-1)
-		b1 = bias_variable([NUM_HIDDEN])
-		fc_pre = tf.matmul(x, W1) + b1
-		fc1 = tf.nn.relu(fc_pre)
+		# Conv1
+		NUM_FILTERS1 = 32
+		W_conv1 = weight_variable([9, 9, 1, NUM_FILTERS1], stddev=0.1)
+		b_conv1 = bias_variable([NUM_FILTERS1], b=1.)
+		h_conv1 = tf.nn.relu(conv2d(x_image, W_conv1) + b_conv1)
+		# Pool
+		h_pool1 = max_pool(h_conv1, 2)
 
-		keep_prob = tf.placeholder("float")
-		fc1_drop = tf.nn.dropout(fc1, keep_prob)
+		# Conv1
+		NUM_FILTERS2 = 16
+		W_conv2 = weight_variable([9, 9, NUM_FILTERS1, NUM_FILTERS2], stddev=0.1)
+		b_conv2 = bias_variable([NUM_FILTERS2], b=1.)
+		h_conv2 = tf.nn.relu(conv2d(h_pool1, W_conv2) + b_conv2)
+		# Pool
+		h_pool2 = max_pool(h_conv2, 2)
+		h_pool2_reshaped = tf.reshape(h_pool2, [ -1, NUM_FILTERS2*FACE_SIZE/4*FACE_SIZE/4 ])
 
-		W2 = weight_variable([NUM_HIDDEN, NUM_HIDDEN/2], stddev=NUM_HIDDEN ** 0.5, wd=1e-1)
-		b2 = bias_variable([NUM_HIDDEN/2])
-		fc2 = tf.nn.relu(tf.matmul(fc1_drop, W2) + b2)
-
-		W3 = weight_variable([NUM_HIDDEN/2, 1], wd=1e-1)
-		b3 = bias_variable([1])
-		y_pred = tf.matmul(fc2, W3) + b3
+		W1 = weight_variable([NUM_FILTERS2*FACE_SIZE/4*FACE_SIZE/4, 1], stddev=0.01)
+		b1 = bias_variable([1])
+		y_pred = tf.matmul(h_pool2_reshaped, W1) + b1
 
 		l2 = tf.nn.l2_loss(y_ - y_pred, name='l2')
 		tf.add_to_collection('losses', l2)
 		total_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
-		LEARNING_RATE = 1e-5
+		LEARNING_RATE = 1e-6
 		batch = tf.Variable(0)
 		numBatches = int(np.ceil(train_x.shape[0] / float(BATCH_SIZE)))
-		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.75, staircase=False)
+		learning_rate = tf.train.exponential_decay(LEARNING_RATE, batch, NUM_EPOCHS*numBatches/10, 0.95, staircase=False)
 		train_step = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.2).minimize(total_loss, global_step=batch)
 
 		session.run(tf.initialize_all_variables())
@@ -595,30 +620,40 @@ def runFCRegression (train_x, train_y, test_x, test_y, numEpochs = NUM_EPOCHS):
 				offset = j*BATCH_SIZE % (train_x.shape[0] - BATCH_SIZE)
 				some_train_x = train_x[offset:offset+BATCH_SIZE, :]
 				some_train_y = train_y[offset:offset+BATCH_SIZE, :]
-				train_step.run({x: some_train_x, y_: some_train_y, keep_prob: 0.75})
+				train_step.run({x_image: some_train_x, y_: some_train_y})
+				ll = total_loss.eval({x_image: some_train_x, y_: some_train_y})
+				print ll
 
-			if i % 25 == 0:
+			if i % 5 == 0:
 				print "Epoch {} (lr={})".format(i, learning_rate.eval())
 
-				ll = total_loss.eval({x: train_x, y_: train_y, keep_prob: 1.0})
-				r, _ = evalCorr(x, train_x, y_pred, train_y, keep_prob)
+				ll = total_loss.eval({x_image: train_x, y_: train_y})
+				r, _ = evalCorr(x_image, train_x, y_pred, train_y)
 				print "Train LL(some)={} r(all)={}".format(ll, r)
 
-				ll = total_loss.eval({x: test_x, y_: test_y, keep_prob: 1.0})
-				r, yhat = evalCorr(x, test_x, y_pred, test_y, keep_prob)
+				ll = total_loss.eval({x_image: test_x, y_: test_y})
+				r, yhat = evalCorr(x_image, test_x, y_pred, test_y)
 				print "Test LL(some)={} r(all)={}".format(ll, r)
 
 				#print np.corrcoef(W1.eval().T)
 
-				#plt.imshow(np.hstack([ np.reshape(W1.eval()[:,idx], [ FACE_SIZE, FACE_SIZE ]) for idx in range(NUM_HIDDEN) ]), cmap='gray')
+				plt.imshow(np.hstack([ np.pad(np.reshape(W_conv1.eval()[:,:,:,idx], [ 9, 9 ]), 2, mode='constant') for idx in range(NUM_FILTERS1) ]), cmap='gray'), plt.show()
+
+				plt.imshow(np.vstack([ \
+				             np.hstack([ np.pad(np.reshape(W_conv2.eval()[:,:,idx1,idx2], [ 9, 9 ]), 2, mode='constant') for idx1 in range(NUM_FILTERS1) ]) \
+					     for idx2 in range(NUM_FILTERS2) ]), cmap='gray'), plt.show()
+			
+				filters = np.reshape(W1.eval(), [ NUM_FILTERS2, FACE_SIZE/4, FACE_SIZE/4 ])
+				plt.imshow(np.hstack([ filters[idx, :,:] for idx in range(NUM_FILTERS2) ]), cmap='gray'), plt.show()
+
 				# Show mistakes
 				#idxs = np.argsort((yhat - test_y.squeeze()) ** 2)[-10:]
 				#print [ yhat[idx] for idx in idxs ]
 				#print test_y[idxs].T
 				#plt.imshow(np.hstack([ np.reshape(test_x[idx,:], (FACE_SIZE, FACE_SIZE)) for idx in idxs ]), cmap='gray')
-				#plt.show()
+				plt.show()
 
-		r, _ = evalCorr(x, test_x, y_pred, test_y, keep_prob)
+		r, _ = evalCorr(x_image, test_x, y_pred, test_y)
 		session.close()
 		return r
 
@@ -630,14 +665,14 @@ if __name__ == "__main__":
 		faces, labels, isVSU, subjects = getDataFast()
 		idxs = np.random.permutation(len(faces))
 	
-		#filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
-		#filterBankF = np.fft.fft2(filterBank)
-		#filteredFaces = filterFaces(faces, filterBankF)
+		filterBank = gabor.makeGaborFilterBank(faces.shape[-1])
+		filterBankF = np.fft.fft2(filterBank)
+		filteredFaces = filterFaces(faces, filterBankF)
 		
-		#masterK = filteredFaces.dot(filteredFaces.T)
+		masterK = filteredFaces.dot(filteredFaces.T)
 
-	trainNNRegression(faces, labels, subjects, foldIdx)
-	#alphas = 10. ** np.arange(-2, +3)
-	#for alpha in alphas:
-	#	print alpha
-	#	trainSVMRegression(labels, subjects, masterK, alpha)
+	#trainNNRegression(faces, labels, subjects, foldIdx)
+	alphas = 10. ** np.arange(-2, +3)
+	for alpha in alphas:
+		print alpha
+		trainSVMRegression(labels, subjects, masterK, alpha)
